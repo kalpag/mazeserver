@@ -1,110 +1,208 @@
 #include <iostream>
+#include <boost/asio.hpp>
 #include <vector>
-#include <map>
-#include <cstdlib>
-#include <ctime>
-#include <memory>
-#include <boost/asio.hpp>      // For Boost.Asio networking
+#include <string>
 
 using boost::asio::ip::tcp;
 
-const int MAZE_SIZE = 5;
+// Constants for maze dimensions
+const int MAZE_HEIGHT = 7;
+const int MAZE_WIDTH = 9;
+
+// Maze with multiple coins ('C'), walls ('#'), and open spaces ('.')
+std::vector<std::string> maze = {
+    "#########",
+    "#P.....C#",
+    "#.C###..#",
+    "#..C....#",
+    "#....###C",
+    "#C......#",
+    "#########"
+};
+
+// Player's initial position
+int playerX = 1, playerY = 1;
+
+// Count remaining coins in the maze
+int coinsRemaining = 5;
 
 class MazeServer {
 public:
     MazeServer(boost::asio::io_context& io_context, short port)
-        : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)), io_context_(io_context) {
-        createMaze();
-        startAccept();
+        : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)) {
+        start_accept();
     }
 
 private:
-    void createMaze() {
-        std::srand(std::time(0));
-        maze_.resize(MAZE_SIZE, std::vector<char>(MAZE_SIZE, '.'));
-        for (int i = 0; i < MAZE_SIZE; ++i) {
-            for (int j = 0; j < MAZE_SIZE; ++j) {
-                if (std::rand() % 5 == 0) {
-                    maze_[i][j] = 'C';  // Place a coin
-                }
+    
+    void shutdown_server() {
+        std::cout << "Shutting down the server gracefully..." << std::endl;
+
+        // Stop accepting new connections and stop the io_context
+        acceptor_.close();        // Stop accepting new connections
+       // acceptor_.get_executor().context().stop();  // Stop all asynchronous operations
+
+        std::cout << "Server shutdown complete." << std::endl;
+        exit(1);
+    }
+    
+    void start_accept() {
+        auto socket = std::make_shared<tcp::socket>(acceptor_.get_executor());
+        acceptor_.async_accept(*socket, [this, socket](boost::system::error_code ec) {
+            if (!ec) {
+                handle_client(socket);
             }
+            start_accept();
+        });
+    }
+
+    void handle_client(std::shared_ptr<tcp::socket> socket) {
+        send_maze(socket);  // Send the initial maze to the client
+        read_command(socket);  // Start reading commands from the client
+    }
+
+    void send_maze(std::shared_ptr<tcp::socket> socket) {
+        std::string mazeStr = get_maze_string();
+        boost::asio::async_write(*socket, boost::asio::buffer(mazeStr), 
+            [this, socket](boost::system::error_code ec, std::size_t /*length*/) {
+            if (!ec) {
+                read_command(socket);  // Continue reading commands after sending the maze
+            }
+        });
+    }
+
+    std::string get_maze_string() {
+        std::string mazeState = "Player position: (" + std::to_string(playerX) + "," + std::to_string(playerY) + ")\n";
+        mazeState += "Coins remaining: " + std::to_string(coinsRemaining) + "\n";
+        for (const auto& row : maze) {
+            mazeState += row + "\n";
         }
-        playerPos_ = {0, 0};  // Start player at the top-left corner
+        return mazeState;
     }
 
-    void startAccept() {
-        // Create a new socket using the io_context directly
-        auto socket = std::make_shared<tcp::socket>(io_context_);
-        acceptor_.async_accept(*socket,
-            [this, socket](const boost::system::error_code& error) {
-                handleAccept(socket, error);
-            });
+    void read_command(std::shared_ptr<tcp::socket> socket) {
+        auto buffer = std::make_shared<boost::asio::streambuf>();
+        boost::asio::async_read_until(*socket, *buffer, '\n',
+            [this, socket, buffer](boost::system::error_code ec, std::size_t /*length*/) {
+            if (!ec) {
+                std::istream is(buffer.get());
+                std::string command;
+                std::getline(is, command);
+                process_command(socket, command);
+            }
+        });
     }
 
-    void handleAccept(std::shared_ptr<tcp::socket> socket, const boost::system::error_code& error) {
-        if (!error) {
-            std::string welcomeMessage = "Welcome to the Maze! Move with WASD.\n";
-            boost::asio::write(*socket, boost::asio::buffer(welcomeMessage));
-            startRead(socket);
-            startAccept();
-        } else {
-            std::cerr << "Accept error: " << error.message() << std::endl;
+    void process_command(std::shared_ptr<tcp::socket> socket, std::string& command) {
+       
+        std::cout<<"client command : " <<command<<std::endl; 
+       
+       // Remove any newline characters at the end of the command
+        if (!command.empty() && command.back() == '\n') {
+            command.erase(command.size() - 1);  // Trim the newline
         }
-    }
 
-    void startRead(std::shared_ptr<tcp::socket> socket) {
-        auto buffer = std::make_shared<std::vector<char>>(1);  // Read 1 char for movement
-        socket->async_read_some(boost::asio::buffer(*buffer),
-            [this, socket, buffer](boost::system::error_code ec, std::size_t length) {
-                if (!ec && length > 0) {
-                    processMove((*buffer)[0], socket);
-                    startRead(socket);  // Keep reading for further moves
-                }
-            });
-    }
-
-    void processMove(char direction, std::shared_ptr<tcp::socket> socket) {
-        std::map<char, std::pair<int, int>> moves = {
-            {'W', {-1, 0}}, {'A', {0, -1}}, {'S', {1, 0}}, {'D', {0, 1}}
-        };
-
-        if (moves.find(direction) != moves.end()) {
-            // Update player position
-            playerPos_.first += moves[direction].first;
-            playerPos_.second += moves[direction].second;
-
-            // Ensure player stays within bounds
-            playerPos_.first = std::clamp(playerPos_.first, 0, MAZE_SIZE - 1);
-            playerPos_.second = std::clamp(playerPos_.second, 0, MAZE_SIZE - 1);
-
-            // Check if player collected a coin
-            if (maze_[playerPos_.first][playerPos_.second] == 'C') {
-                maze_[playerPos_.first][playerPos_.second] = '.';  // Remove the coin
-                std::string message = "You collected a coin!\n";
-                boost::asio::write(*socket, boost::asio::buffer(message));
-            } else {
-                std::string message = "Moved!\n";
-                boost::asio::write(*socket, boost::asio::buffer(message));
+        // Ensure to also handle the case where the client might send a newline character
+        if (command == "\n") {
+            return; // or handle accordingly
+        }
+        
+        std::string response;
+        if (move_player(command)) {
+            response = "Moved " + command.substr(5) + ".\n";
+            if (coinsRemaining == 0) {
+                response += "Victory! You collected all the coins.\n";
             }
         } else {
-            std::string message = "Invalid move! Use WASD to move.\n";
-            boost::asio::write(*socket, boost::asio::buffer(message));
+            response = "Invalid move or command.\n";
         }
+
+        boost::asio::async_write(*socket, boost::asio::buffer(response), 
+            [this, socket](boost::system::error_code ec, std::size_t /*length*/) {
+            if (!ec) {
+                send_maze(socket);  // Send the updated maze after processing the move
+            }
+        });
     }
 
-    std::vector<std::vector<char>> maze_;
-    std::pair<int, int> playerPos_;  // Track player position
-    tcp::acceptor acceptor_;  // For accepting client connections
-    boost::asio::io_context& io_context_;  // Reference to the io_context
+    // Function to move the player based on the command
+bool move_player(const std::string& command) {
+    int newX = playerX;
+    int newY = playerY;
+
+    std::cout << "Current position: (" << playerX << ", " << playerY << "), Command: " << command << "\n";
+
+    if (command == "kill") {
+        shutdown_server();
+        return false; // Terminate the move operation after server shutdown
+    }
+
+    // Handle movement commands
+    if (command == "W") {
+        if (playerX > 0) {
+            newX--;  // Move up
+        }
+    } else if (command == "S") {
+        if (playerX < MAZE_HEIGHT - 1) {
+            newX++;  // Move down
+        }
+    } else if (command == "A") {
+        if (playerY > 0) {
+            newY--;  // Move left
+        }
+    } else if (command == "D") {
+        if (playerY < MAZE_WIDTH - 1) {
+            newY++;  // Move right
+        }
+    } else {
+        std::cout << "Invalid command: " << command << "\n";
+        return false;  // Invalid command
+    }
+
+    // Debug output for proposed new position
+    std::cout << "Proposed new position: (" << newX << ", " << newY << ")\n";
+
+    // Validate new position before accessing the maze
+    if (newX >= 0 && newX < MAZE_HEIGHT && newY >= 0 && newY < MAZE_WIDTH) {
+        // Check for wall collision
+        if (maze[newX][newY] != '#') {
+            // Update player's position in the maze
+            maze[playerX][playerY] = '.';  // Mark old position as open space
+            playerX = newX;
+            playerY = newY;
+
+            // If the player collects a coin
+            if (maze[playerX][playerY] == 'C') {
+                coinsRemaining--;
+                std::cout << "Coin collected! Coins remaining: " << coinsRemaining << "\n";
+            }
+            maze[playerX][playerY] = 'P';  // Update new player position
+            return true;  // Successful move
+        } else {
+            std::cout << "Hit a wall at: (" << newX << ", " << newY << ")\n";
+            return false;  // Move invalid due to wall
+        }
+    } else {
+        std::cout << "Proposed move out of bounds: (" << newX << ", " << newY << ")\n";
+    }
+
+    return false;  // If all checks fail
+}
+
+
+
+
+
+
+
+    tcp::acceptor acceptor_;
 };
 
 int main() {
-    try {
+    
+       
+        std::cout<<"Maze Server is running......"<<std::endl;
         boost::asio::io_context io_context;
-        MazeServer server(io_context, 1234);
-        io_context.run();  // Run the I/O context to start the server
-    } catch (std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-    }
-    return 0;
+        MazeServer server(io_context, 12345);  // Start the server on port 12345
+        io_context.run();  // Run the server loop
 }
