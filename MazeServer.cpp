@@ -3,7 +3,7 @@
 #include <vector>
 #include <string>
 #include <queue>
-#include <unordered_set>
+#include <utility>
 
 using boost::asio::ip::tcp;
 
@@ -14,11 +14,11 @@ const int MAZE_WIDTH = 9;
 // Maze with multiple coins ('C'), walls ('#'), and open spaces ('.')
 std::vector<std::string> maze = {
     "#########",
-    "#C.....C#",
+    "#P.....C#",
     "#.C###..#",
     "#..C....#",
-    "#....###C",
-    "#C......#",
+    "#....####",
+    "#C....C.#",
     "#########"
 };
 
@@ -28,14 +28,6 @@ int playerX = 1, playerY = 1;
 // Count remaining coins in the maze
 int coinsRemaining = 5;
 
-// Direction vectors for moving up, down, left, right
-const std::vector<std::pair<int, int>> directions = {
-    {-1, 0}, // Up
-    {1, 0},  // Down
-    {0, -1}, // Left
-    {0, 1}   // Right
-};
-
 class MazeServer {
 public:
     MazeServer(boost::asio::io_context& io_context, short port)
@@ -44,9 +36,11 @@ public:
     }
 
 private:
+    tcp::acceptor acceptor_;
+
     void shutdown_server() {
         std::cout << "Shutting down the server gracefully..." << std::endl;
-        acceptor_.close(); // Stop accepting new connections
+        acceptor_.close();  // Stop accepting new connections
         std::cout << "Server shutdown complete." << std::endl;
         exit(1);
     }
@@ -62,16 +56,16 @@ private:
     }
 
     void handle_client(std::shared_ptr<tcp::socket> socket) {
-        send_maze(socket); // Send the initial maze to the client
-        read_command(socket); // Start reading commands from the client
+        send_maze(socket);  // Send the initial maze to the client
+        read_command(socket);  // Start reading commands from the client
     }
 
     void send_maze(std::shared_ptr<tcp::socket> socket) {
         std::string mazeStr = get_maze_string();
-        boost::asio::async_write(*socket, boost::asio::buffer(mazeStr),
+        boost::asio::async_write(*socket, boost::asio::buffer(mazeStr), 
             [this, socket](boost::system::error_code ec, std::size_t /*length*/) {
             if (!ec) {
-                read_command(socket); // Continue reading commands after sending the maze
+                read_command(socket);  // Continue reading commands after sending the maze
             }
         });
     }
@@ -98,44 +92,42 @@ private:
         });
     }
 
-    void process_command(std::shared_ptr<tcp::socket> socket,std::string& command) {
-        std::cout << "Client command: " << command << std::endl;
-
-        // Remove any newline characters at the end of the command
+    void process_command(std::shared_ptr<tcp::socket> socket, std::string& command) {
+        std::cout << "Client command: " << command << std::endl; 
         if (!command.empty() && command.back() == '\n') {
-            command.erase(command.size() - 1); // Trim the newline
+            command.erase(command.size() - 1);  // Trim the newline
         }
-
+        
         std::string response;
-        
-        if(command=="kill")
-            shutdown_server();
-        
-        if (command == "path") {
-            auto path = find_shortest_path_to_coin(); // Find the shortest path
-            highlight_path(path); // Highlight the path in the maze
-            response = "Path to nearest coin found and highlighted.\n";
-        } else if (move_player(command)) {
+        if (move_player(command)) {
             response = "Moved " + command + ".\n";
             if (coinsRemaining == 0) {
                 response += "Victory! You collected all the coins.\n";
             }
+            // Highlight the path after moving
+            highlight_path();
+
+            // Find and display the shortest path to the nearest coin
+            std::string shortestPath = find_shortest_path();
+            response += "Shortest path to the nearest coin: " + shortestPath + "\n";
         } else {
             response = "Invalid move or command.\n";
         }
 
-        boost::asio::async_write(*socket, boost::asio::buffer(response),
-            [this, socket](boost::system::error_code ec, std::size_t /*length*/) {
-            if (!ec) {
-                send_maze(socket); // Send the updated maze after processing the command
-            }
-        });
+        // Send updated maze
+        send_maze(socket);
     }
 
+    // Function to move the player based on the command
     bool move_player(const std::string& command) {
         int newX = playerX;
         int newY = playerY;
 
+        std::cout << "Current position: (" << playerX << ", " << playerY << "), Command: " << command << std::endl;
+
+        if (command == "kill") {
+            shutdown_server();
+        }
         if (command == "W" && playerX > 0 && maze[playerX - 1][playerY] != '#') {
             newX--;
         } else if (command == "S" && playerX < MAZE_HEIGHT - 1 && maze[playerX + 1][playerY] != '#') {
@@ -145,83 +137,86 @@ private:
         } else if (command == "D" && playerY < MAZE_WIDTH - 1 && maze[playerX][playerY + 1] != '#') {
             newY++;
         } else {
-            return false; // Invalid move (e.g., hitting a wall or invalid command)
+            return false;  // Invalid move (e.g., hitting a wall or invalid command)
         }
 
         // Update player's position on the maze
-        maze[playerX][playerY] = '.'; // Mark the old position as an open space
+        maze[playerX][playerY] = '.';  // Mark the old position as an open space
         playerX = newX;
         playerY = newY;
 
         // If the player collects a coin
         if (maze[playerX][playerY] == 'C') {
             coinsRemaining--;
+            std::cout << "Coin collected! Coins remaining: " << coinsRemaining << std::endl;
         }
-        maze[playerX][playerY] = 'P'; // Mark the new position of the player
+        maze[playerX][playerY] = 'P';  // Mark the new position of the player
+
+        std::cout << "New position: (" << playerX << ", " << playerY << "), Coins remaining: " << coinsRemaining << std::endl;
 
         return true;
     }
 
-    std::vector<std::pair<int, int>> find_shortest_path_to_coin() {
-        std::queue<std::pair<int, int>> q;
-        std::unordered_set<std::string> visited;
-        std::vector<std::pair<int, int>> path;
-        std::pair<int, int> nearestCoin = {-1, -1};
+    // Function to highlight the path taken by the player
+    void highlight_path() {
+        // This is a simple demonstration of marking the path
+        // In a real scenario, you may want to track the path more intelligently
+        // Here, we will just mark the previous position with 'X'
+        if (maze[playerX][playerY] != 'P') {
+            maze[playerX][playerY] = 'X';  // Mark the path
+        }
+    }
 
-        q.push({playerX, playerY});
-        visited.insert(std::to_string(playerX) + "," + std::to_string(playerY));
+    // Function to find the shortest path to the nearest coin using BFS
+    std::string find_shortest_path() {
+        std::queue<std::pair<int, int>> queue;
+        std::vector<std::vector<bool>> visited(MAZE_HEIGHT, std::vector<bool>(MAZE_WIDTH, false));
+        std::vector<std::vector<std::pair<int, int>>> parent(MAZE_HEIGHT, std::vector<std::pair<int, int>>(MAZE_WIDTH, {-1, -1}));
 
-        while (!q.empty()) {
-            auto [x, y] = q.front();
-            q.pop();
+        queue.push({playerX, playerY});
+        visited[playerX][playerY] = true;
 
-            // Check for nearest coin
+        // Directions for moving in the maze
+        std::vector<std::pair<int, int>> directions = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+        
+        while (!queue.empty()) {
+            auto [x, y] = queue.front();
+            queue.pop();
+
+            // Check for coins
             if (maze[x][y] == 'C') {
-                nearestCoin = {x, y};
-                break; // Stop searching after finding the first coin
+                // Backtrack to find the path
+                std::string path;
+                while (parent[x][y] != std::make_pair(-1, -1)) {
+                    path += "(" + std::to_string(x) + "," + std::to_string(y) + ") ";
+                    std::tie(x, y) = parent[x][y];
+                }
+                std::reverse(path.begin(), path.end());
+                return path;  // Return the path to the nearest coin
             }
 
             // Explore neighbors
             for (const auto& [dx, dy] : directions) {
-                int newX = x + dx;
-                int newY = y + dy;
+                int nx = x + dx;
+                int ny = y + dy;
 
-                if (newX >= 0 && newX < MAZE_HEIGHT && newY >= 0 && newY < MAZE_WIDTH &&
-                    maze[newX][newY] != '#' && visited.find(std::to_string(newX) + "," + std::to_string(newY)) == visited.end()) {
-                    q.push({newX, newY});
-                    visited.insert(std::to_string(newX) + "," + std::to_string(newY));
+                if (nx >= 0 && nx < MAZE_HEIGHT && ny >= 0 && ny < MAZE_WIDTH && !visited[nx][ny] && maze[nx][ny] != '#') {
+                    visited[nx][ny] = true;
+                    parent[nx][ny] = {x, y};  // Track the parent node
+                    queue.push({nx, ny});
                 }
             }
         }
-
-        // If a nearest coin was found, backtrack to create the path
-        if (nearestCoin.first != -1) {
-            path.push_back(nearestCoin);
-            // Optionally implement a backtracking path here or just return the coordinates
-        }
-
-        return path;
+        return "No path to a coin found.";  // If no path found
     }
-
-    void highlight_path(const std::vector<std::pair<int, int>>& path) {
-        for (const auto& [x, y] : path) {
-            if (maze[x][y] == 'C') {
-                maze[x][y] = '*'; // Highlight the coin position
-            } else {
-                maze[x][y] = '.'; // Highlight the path with dots
-            }
-        }
-    }
-
-    tcp::acceptor acceptor_;
 };
 
 int main() {
     try {
         std::cout << "Maze Server is running..." << std::endl;
         boost::asio::io_context io_context;
-        MazeServer server(io_context, 12345); // Start the server on port 12345
-        io_context.run(); // Run the server loop
+        MazeServer server(io_context, 12345);  // Start the server on port 12345
+        io_context.run();  // Run the server loop
     } catch (std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;
     }
